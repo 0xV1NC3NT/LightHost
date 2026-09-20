@@ -1,14 +1,14 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(LightHost VERSION 1.3.0 LANGUAGES C CXX)
+project(LightHost VERSION 2.0.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# Enable ASIO support by dropping the Steinberg ASIO SDK into ThirdParty/ASIOSDK
-# (the SDK cannot be redistributed) and setting -DLIGHTHOST_ENABLE_ASIO=ON.
-option(LIGHTHOST_ENABLE_ASIO "Enable ASIO device support (requires the ASIO SDK)" OFF)
+# ASIO support (-DLIGHTHOST_ENABLE_ASIO=ON). Uses ThirdParty/ASIOSDK if present,
+# otherwise fetches the Steinberg ASIO SDK 2.3.4 (dual-licensed, used here under GPLv3).
+option(LIGHTHOST_ENABLE_ASIO "Enable ASIO device support" OFF)
 
 include(FetchContent)
 FetchContent_Declare(
@@ -19,8 +19,23 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(JUCE)
 
+set(LIGHTHOST_ASIO_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/ThirdParty/ASIOSDK/common")
+if(LIGHTHOST_ENABLE_ASIO AND NOT EXISTS "${LIGHTHOST_ASIO_INCLUDE_DIR}/asio.h")
+    FetchContent_Declare(
+        asiosdk
+        GIT_REPOSITORY https://github.com/audiosdk/asio.git
+        GIT_TAG 496a0765b8bb9c26f764f22f9a9712a937177db2
+        GIT_SHALLOW FALSE
+    )
+    FetchContent_GetProperties(asiosdk)
+    if(NOT asiosdk_POPULATED)
+        FetchContent_Populate(asiosdk)
+    endif()
+    set(LIGHTHOST_ASIO_INCLUDE_DIR "${asiosdk_SOURCE_DIR}/common")
+endif()
+
 juce_add_gui_app(LightHost
-    VERSION "1.3.0"
+    VERSION "2.0.0"
     PRODUCT_NAME "Light Host"
     COMPANY_NAME "Vincent"
     BUNDLE_ID "com.vincent.lighthost"
@@ -62,7 +77,7 @@ target_compile_definitions(LightHost PRIVATE
 )
 
 if(LIGHTHOST_ENABLE_ASIO)
-    target_include_directories(LightHost PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/ThirdParty/ASIOSDK/common")
+    target_include_directories(LightHost PRIVATE "${LIGHTHOST_ASIO_INCLUDE_DIR}")
 endif()
 
 # Vectorize for AVX2. Trades support for pre-2013-ish CPUs for better SIMD

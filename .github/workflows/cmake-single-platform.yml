@@ -3,12 +3,15 @@ name: Build
 on:
   push:
     branches: [master]
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
 jobs:
   windows:
     runs-on: windows-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -29,7 +32,7 @@ jobs:
           -G Ninja
           -DCMAKE_BUILD_TYPE=Release
           -DFETCHCONTENT_BASE_DIR="${{ github.workspace }}/deps"
-          -DLIGHTHOST_ENABLE_ASIO=OFF
+          -DLIGHTHOST_ENABLE_ASIO=ON
 
       - name: Build (Release)
         run: cmake --build build
@@ -40,3 +43,17 @@ jobs:
           name: LightHost-windows-x64
           path: build/LightHost_artefacts/Release/Light Host.exe
           if-no-files-found: error
+
+      - name: Package release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: >
+          Compress-Archive
+          -Path "build/LightHost_artefacts/Release/Light Host.exe"
+          -DestinationPath "LightHost-${{ github.ref_name }}-windows-x64.zip"
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" "LightHost-${{ github.ref_name }}-windows-x64.zip" --title "${{ github.ref_name }}" --generate-notes
