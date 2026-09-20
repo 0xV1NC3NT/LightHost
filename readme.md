@@ -9,4 +9,5 @@ See [#1](https://github.com/rolandoislas/LightHost/issues/1)
 
 ### Screenshot
 
-![Light Host 1.2](http://i.imgur.com/UF9SWfC.jpg)
+![Light Host 2.0](https://i.ibb.co/sJqQ84XK/2026-09-21-020640.png)
+![Light Host 2.0](https://i.ibb.co/5gDvNd8T/2026-09-21-020651.png)
