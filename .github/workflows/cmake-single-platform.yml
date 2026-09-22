@@ -70,7 +70,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: LightHost-macos
-          path: build/LightHost_artefacts/Release/Light Host.app
+          path: build/LightHost_artefacts/Release
           if-no-files-found: error
 
   release:
