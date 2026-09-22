@@ -85,7 +85,8 @@ endif()
 # which are separate binaries compiled by their own vendors.
 if(MSVC)
     target_compile_options(LightHost PRIVATE $<$<CONFIG:Release>:/arch:AVX2>)
-else()
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|i.86)$")
+    # AVX2 is an x86 instruction set extension - skip it on ARM (e.g. Apple Silicon).
     target_compile_options(LightHost PRIVATE $<$<CONFIG:Release>:-mavx2>)
 endif()
 

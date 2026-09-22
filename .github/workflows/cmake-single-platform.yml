@@ -10,8 +10,6 @@ on:
 jobs:
   windows:
     runs-on: windows-latest
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -44,16 +42,60 @@ jobs:
           path: build/LightHost_artefacts/Release/Light Host.exe
           if-no-files-found: error
 
-      - name: Package release
-        if: startsWith(github.ref, 'refs/tags/v')
-        shell: pwsh
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache JUCE download
+        uses: actions/cache@v4
+        with:
+          path: deps
+          key: juce-${{ runner.os }}-${{ hashFiles('CMakeLists.txt') }}
+
+      - name: Install Ninja
+        run: brew install ninja
+
+      - name: Configure
         run: >
-          Compress-Archive
-          -Path "build/LightHost_artefacts/Release/Light Host.exe"
-          -DestinationPath "LightHost-${{ github.ref_name }}-windows-x64.zip"
+          cmake -S . -B build
+          -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DFETCHCONTENT_BASE_DIR="${{ github.workspace }}/deps"
+
+      - name: Build (Release)
+        run: cmake --build build
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LightHost-macos
+          path: build/LightHost_artefacts/Release/Light Host.app
+          if-no-files-found: error
+
+  release:
+    needs: [windows, macos]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Package
+        run: |
+          cd "artifacts/LightHost-windows-x64"
+          zip -r "../../LightHost-${{ github.ref_name }}-windows-x64.zip" "Light Host.exe"
+          cd "../LightHost-macos"
+          zip -r "../../LightHost-${{ github.ref_name }}-macos.zip" "Light Host.app"
 
       - name: Create GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${{ github.ref_name }}" "LightHost-${{ github.ref_name }}-windows-x64.zip" --title "${{ github.ref_name }}" --generate-notes
+        run: >
+          gh release create "${{ github.ref_name }}"
+          "LightHost-${{ github.ref_name }}-windows-x64.zip"
+          "LightHost-${{ github.ref_name }}-macos.zip"
+          --title "${{ github.ref_name }}" --generate-notes
