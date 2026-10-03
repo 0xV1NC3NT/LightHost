@@ -15,6 +15,9 @@ struct ActivePlugin
     PluginDescription description;
     String instanceId;
     bool bypassed = false;
+    // Set while the plugin couldn't be instantiated (e.g. its license check failed
+    // offline). It stays in the chain, skipped by the audio graph, until it loads.
+    bool unavailable = false;
     AudioProcessorGraph::NodeID nodeId;
 };
 
@@ -56,7 +59,6 @@ public:
     void openPluginScanner();
     void openControlPanel();
     void toggleIconColor();
-    void deleteAllPluginStates();
     void quit();
 
     void addPlugin(const PluginDescription& plugin);
@@ -90,6 +92,9 @@ private:
     void migrateLegacySettings();
     void loadActivePlugins();
     void resetGraphAndLoadFromXml(const XmlElement* pluginsXml, bool assignFreshInstanceIds);
+    std::unique_ptr<AudioPluginInstance> createPluginInstanceFor(const PluginDescription& description, const String& instanceId);
+    void retryUnavailablePlugins(bool manual);
+    void scheduleRetry();
     void rebuildConnections();
     void savePluginStates();
     void persistActivePluginList();
@@ -111,6 +116,18 @@ private:
     uint32 nextNodeUid = 3;
     Array<ActivePlugin> activePlugins;
 
+    // Nothing may overwrite the saved chain until it has actually been loaded.
+    bool chainLoaded = false;
+    bool retryInProgress = false;
+    int retryAttempt = 0;
+
+    struct RetryTimer final : public Timer
+    {
+        std::function<void()> onTick;
+        void timerCallback() override { if (onTick) onTick(); }
+    };
+    RetryTimer retryTimer;
+
     #if JUCE_WINDOWS
     int trayMenuX = 0, trayMenuY = 0;
     #endif
@@ -130,7 +147,6 @@ private:
     static constexpr int CMD_EDIT_PLUGINS = CMD_BASE + 2;
     static constexpr int CMD_CONTROL_PANEL = CMD_BASE + 3;
     static constexpr int CMD_QUIT = CMD_BASE + 4;
-    static constexpr int CMD_DELETE_STATES = CMD_BASE + 5;
     static constexpr int CMD_INVERT_ICON = CMD_BASE + 6;
 
     friend class ControlPanelWindow;

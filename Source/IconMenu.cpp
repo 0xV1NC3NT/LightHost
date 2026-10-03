@@ -125,10 +125,19 @@ IconMenu::IconMenu()
     knownPluginList.addChangeListener(this);
 
     migrateLegacySettings();
-    loadActivePlugins();
+
+    retryTimer.onTick = [this] { retryUnavailablePlugins(false); };
 
     setIcon();
     setIconTooltip(JUCEApplication::getInstance()->getApplicationName());
+
+    // Plugins with online license checks can take a long time (or block) while
+    // loading, so the tray icon is shown first and the chain loads afterwards.
+    MessageManager::callAsync([safeThis = Component::SafePointer<IconMenu>(this)]
+    {
+        if (safeThis != nullptr)
+            safeThis->loadActivePlugins();
+    });
 }
 
 IconMenu::~IconMenu()
@@ -225,6 +234,7 @@ void IconMenu::loadActivePlugins()
 
 void IconMenu::resetGraphAndLoadFromXml(const XmlElement* pluginsXml, bool assignFreshInstanceIds)
 {
+    retryTimer.stopTimer();
     PluginWindow::closeAllCurrentlyOpenWindows();
 
     graph.clear();
@@ -236,28 +246,17 @@ void IconMenu::resetGraphAndLoadFromXml(const XmlElement* pluginsXml, bool assig
         AudioProcessorGraph::AudioGraphIOProcessor::audioOutputNode), AudioProcessorGraph::NodeID(2))->nodeID;
     nextNodeUid = 3;
 
+    bool anyUnavailable = false;
+
     if (pluginsXml != nullptr)
     {
+        auto* settings = getAppProperties().getUserSettings();
+
         for (auto* pluginXml : pluginsXml->getChildIterator())
         {
             PluginDescription desc;
             if (!desc.loadFromXml(*pluginXml))
                 continue;
-
-            String errorMessage;
-            auto instance = formatManager.createPluginInstance(desc, graph.getSampleRate(), graph.getBlockSize(), errorMessage);
-            if (instance == nullptr)
-            {
-                Logger::writeToLog("Light Host: failed to load plugin \"" + desc.name + "\": " + errorMessage);
-                continue;
-            }
-
-            // Some plugins (VST3 in particular) only fully build their parameter
-            // tree once prepareToPlay has run - restoring state before that can
-            // get silently discarded. Prepare first, then restore, then hand it
-            // to the graph (which will prepare it again, harmlessly, on its own).
-            if (graph.getSampleRate() > 0)
-                instance->prepareToPlay(graph.getSampleRate(), graph.getBlockSize());
 
             ActivePlugin ap;
             ap.description = desc;
@@ -267,12 +266,13 @@ void IconMenu::resetGraphAndLoadFromXml(const XmlElement* pluginsXml, bool assig
             {
                 ap.instanceId = Uuid().toString();
 
+                // State goes through the same settings key as a regular session so a
+                // plugin that fails to load keeps it for a later retry.
                 if (auto* stateXml = pluginXml->getChildByName("STATE"))
                 {
-                    MemoryBlock state;
-                    state.fromBase64Encoding(stateXml->getAllSubText());
-                    if (state.getSize() > 0)
-                        instance->setStateInformation(state.getData(), (int) state.getSize());
+                    const String state = stateXml->getAllSubText();
+                    if (state.isNotEmpty())
+                        settings->setValue(makeStateKey(ap.instanceId), state);
                 }
             }
             else
@@ -280,23 +280,147 @@ void IconMenu::resetGraphAndLoadFromXml(const XmlElement* pluginsXml, bool assig
                 ap.instanceId = pluginXml->getStringAttribute("instanceId");
                 if (ap.instanceId.isEmpty())
                     ap.instanceId = Uuid().toString();
-
-                const String savedState = getAppProperties().getUserSettings()->getValue(makeStateKey(ap.instanceId));
-                if (savedState.isNotEmpty())
-                {
-                    MemoryBlock savedStateBinary;
-                    savedStateBinary.fromBase64Encoding(savedState);
-                    instance->setStateInformation(savedStateBinary.getData(), (int) savedStateBinary.getSize());
-                }
             }
 
-            auto node = graph.addNode(std::move(instance), AudioProcessorGraph::NodeID(nextNodeUid++));
-            ap.nodeId = node->nodeID;
+            if (auto instance = createPluginInstanceFor(desc, ap.instanceId))
+            {
+                ap.nodeId = graph.addNode(std::move(instance), AudioProcessorGraph::NodeID(nextNodeUid++))->nodeID;
+            }
+            else
+            {
+                ap.unavailable = true;
+                anyUnavailable = true;
+            }
+
             activePlugins.add(ap);
         }
     }
 
+    chainLoaded = true;
     rebuildConnections();
+
+    retryAttempt = 0;
+    if (anyUnavailable)
+        scheduleRetry();
+}
+
+std::unique_ptr<AudioPluginInstance> IconMenu::createPluginInstanceFor(const PluginDescription& description, const String& instanceId)
+{
+    String errorMessage;
+    std::unique_ptr<AudioPluginInstance> instance;
+
+    // Plugin code is outside our control (license checks, network calls...), so a
+    // failure here must never take the whole host down with it.
+    try
+    {
+        instance = formatManager.createPluginInstance(description, graph.getSampleRate(), graph.getBlockSize(), errorMessage);
+    }
+    catch (...)
+    {
+        errorMessage = "the plugin threw an exception while loading";
+    }
+
+    if (instance == nullptr)
+    {
+        Logger::writeToLog("Light Host: failed to load plugin \"" + description.name + "\": " + errorMessage);
+        return nullptr;
+    }
+
+    // Some plugins (VST3 in particular) only fully build their parameter
+    // tree once prepareToPlay has run - restoring state before that can
+    // get silently discarded. Prepare first, then restore, then hand it
+    // to the graph (which will prepare it again, harmlessly, on its own).
+    if (graph.getSampleRate() > 0)
+        instance->prepareToPlay(graph.getSampleRate(), graph.getBlockSize());
+
+    const String savedState = getAppProperties().getUserSettings()->getValue(makeStateKey(instanceId));
+    if (savedState.isNotEmpty())
+    {
+        MemoryBlock savedStateBinary;
+        savedStateBinary.fromBase64Encoding(savedState);
+        instance->setStateInformation(savedStateBinary.getData(), (int) savedStateBinary.getSize());
+    }
+
+    return instance;
+}
+
+void IconMenu::scheduleRetry()
+{
+    // Gives the network time to come up after login without hammering plugins
+    // that pop up a dialog on every failed license check.
+    static constexpr int delaysSeconds[] = { 5, 15, 30, 60, 120 };
+
+    if (retryAttempt >= numElementsInArray(delaysSeconds))
+        return;
+
+    retryTimer.startTimer(delaysSeconds[retryAttempt++] * 1000);
+}
+
+void IconMenu::retryUnavailablePlugins(bool manual)
+{
+    retryTimer.stopTimer();
+
+    if (retryInProgress)
+        return;
+
+    if (manual)
+        retryAttempt = 0;
+
+    StringArray pendingIds;
+    for (auto& ap : activePlugins)
+        if (ap.unavailable)
+            pendingIds.add(ap.instanceId);
+
+    if (pendingIds.isEmpty())
+        return;
+
+    const ScopedValueSetter<bool> inProgress(retryInProgress, true);
+
+    // Loading can run a nested message loop (license dialogs), so the chain may be
+    // edited in the meantime - entries are looked up by id instead of held by reference.
+    auto indexOfInstance = [this](const String& id)
+    {
+        for (int i = 0; i < activePlugins.size(); ++i)
+            if (activePlugins.getReference(i).instanceId == id)
+                return i;
+        return -1;
+    };
+
+    bool anyLoaded = false, anyStillMissing = false;
+
+    for (auto& id : pendingIds)
+    {
+        const int before = indexOfInstance(id);
+        if (before < 0 || !activePlugins.getReference(before).unavailable)
+            continue;
+
+        const PluginDescription description = activePlugins.getReference(before).description;
+        auto instance = createPluginInstanceFor(description, id);
+
+        const int index = indexOfInstance(id);
+        if (index < 0 || !activePlugins.getReference(index).unavailable)
+            continue;
+
+        if (instance == nullptr)
+        {
+            anyStillMissing = true;
+            continue;
+        }
+
+        auto& ap = activePlugins.getReference(index);
+        ap.nodeId = graph.addNode(std::move(instance), AudioProcessorGraph::NodeID(nextNodeUid++))->nodeID;
+        ap.unavailable = false;
+        anyLoaded = true;
+    }
+
+    if (anyLoaded)
+    {
+        rebuildConnections();
+        notifyChainChanged();
+    }
+
+    if (anyStillMissing)
+        scheduleRetry();
 }
 
 void IconMenu::rebuildConnections()
@@ -317,7 +441,7 @@ void IconMenu::rebuildConnections()
 
     for (auto& ap : activePlugins)
     {
-        if (ap.bypassed)
+        if (ap.bypassed || ap.unavailable)
             continue;
 
         if (!hasPrevious)
@@ -349,18 +473,14 @@ void IconMenu::rebuildConnections()
 
 void IconMenu::addPlugin(const PluginDescription& plugin)
 {
-    String errorMessage;
-    auto instance = formatManager.createPluginInstance(plugin, graph.getSampleRate(), graph.getBlockSize(), errorMessage);
-    if (instance == nullptr)
-    {
-        Logger::writeToLog("Light Host: failed to load plugin \"" + plugin.name + "\": " + errorMessage);
-        return;
-    }
-
     ActivePlugin ap;
     ap.description = plugin;
     ap.instanceId = Uuid().toString();
     ap.bypassed = false;
+
+    auto instance = createPluginInstanceFor(plugin, ap.instanceId);
+    if (instance == nullptr)
+        return;
 
     auto node = graph.addNode(std::move(instance), AudioProcessorGraph::NodeID(nextNodeUid++));
     ap.nodeId = node->nodeID;
@@ -403,6 +523,18 @@ void IconMenu::editPluginRequested(int index)
     if (!isPositiveAndBelow(index, activePlugins.size()))
         return;
 
+    if (activePlugins.getReference(index).unavailable)
+    {
+        // Deferred: reloading refreshes the Control Panel list, which must not
+        // happen while one of its own buttons is still handling a click.
+        MessageManager::callAsync([safeThis = Component::SafePointer<IconMenu>(this)]
+        {
+            if (safeThis != nullptr)
+                safeThis->retryUnavailablePlugins(true);
+        });
+        return;
+    }
+
     if (AudioProcessorGraph::Node::Ptr node = graph.getNodeForId(activePlugins.getReference(index).nodeId))
         if (auto* w = PluginWindow::getWindowFor(node, PluginWindow::Normal))
             w->toFront(true);
@@ -438,6 +570,7 @@ Array<PluginChainEntry> IconMenu::buildChainEntries() const
         PluginChainEntry entry;
         entry.name = ap.description.name;
         entry.bypassed = ap.bypassed;
+        entry.unavailable = ap.unavailable;
         entries.add(entry);
     }
     return entries;
@@ -452,6 +585,9 @@ void IconMenu::notifyChainChanged()
 
 void IconMenu::persistActivePluginList()
 {
+    if (!chainLoaded)
+        return;
+
     XmlElement chainXml("ACTIVEPLUGINS");
     for (auto& ap : activePlugins)
     {
@@ -499,15 +635,17 @@ void IconMenu::timerCallback()
 
         for (int i = 0; i < activePlugins.size(); ++i)
         {
+            const auto& active = activePlugins.getReference(i);
+
             PopupMenu options;
-            options.addItem(INDEX_EDIT + i, "Edit");
-            options.addItem(INDEX_BYPASS + i, "Bypass", true, activePlugins.getReference(i).bypassed);
+            options.addItem(INDEX_EDIT + i, active.unavailable ? "Retry Loading" : "Edit");
+            options.addItem(INDEX_BYPASS + i, "Bypass", true, active.bypassed);
             options.addSeparator();
             options.addItem(INDEX_MOVE_UP + i, "Move Up", i > 0);
             options.addItem(INDEX_MOVE_DOWN + i, "Move Down", i < activePlugins.size() - 1);
             options.addSeparator();
             options.addItem(INDEX_DELETE + i, "Delete");
-            menu.addSubMenu(activePlugins.getReference(i).description.name, options);
+            menu.addSubMenu(active.unavailable ? active.description.name + " (unavailable)" : active.description.name, options);
         }
 
         menu.addSeparator();
@@ -519,8 +657,6 @@ void IconMenu::timerCallback()
         menu.addItem(CMD_CONTROL_PANEL, "Control Panel...");
         menu.addSeparator();
         menu.addItem(CMD_QUIT, "Quit");
-        menu.addSeparator();
-        menu.addItem(CMD_DELETE_STATES, "Delete Plugin States");
         #if !JUCE_MAC
         menu.addItem(CMD_INVERT_ICON, "Invert Icon Color");
         #endif
@@ -583,11 +719,6 @@ void IconMenu::menuInvocationCallback(int id, IconMenu* im)
         im->quit();
         return;
     }
-    if (id == CMD_DELETE_STATES)
-    {
-        im->deleteAllPluginStates();
-        return;
-    }
     if (id == CMD_INVERT_ICON)
     {
         im->toggleIconColor();
@@ -623,13 +754,6 @@ void IconMenu::savePluginStates()
             getAppProperties().getUserSettings()->setValue(makeStateKey(ap.instanceId), savedStateBinary.toBase64Encoding());
         }
     }
-    getAppProperties().saveIfNeeded();
-}
-
-void IconMenu::deleteAllPluginStates()
-{
-    for (auto& ap : activePlugins)
-        getAppProperties().getUserSettings()->removeValue(makeStateKey(ap.instanceId));
     getAppProperties().saveIfNeeded();
 }
 
@@ -733,6 +857,11 @@ void IconMenu::saveConfigAs(const String& name)
             MemoryBlock state;
             node->getProcessor()->getStateInformation(state);
             stateBase64 = state.toBase64Encoding();
+        }
+        else
+        {
+            // Not loaded right now - keep whatever state was saved for it.
+            stateBase64 = getAppProperties().getUserSettings()->getValue(makeStateKey(ap.instanceId));
         }
         pluginXml->createNewChildElement("STATE")->addTextElement(stateBase64);
         configXml.addChildElement(pluginXml.release());

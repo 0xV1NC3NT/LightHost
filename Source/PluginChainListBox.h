@@ -14,6 +14,7 @@ struct PluginChainEntry
 {
     String name;
     bool bypassed = false;
+    bool unavailable = false;
 };
 
 class PluginChainListBox : public Component

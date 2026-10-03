@@ -9,8 +9,9 @@
 class PluginChainListBox::Row final : public Component
 {
 public:
-    Row(PluginChainListBox& ownerBox, int startIndex, String nameToShow, bool bypassedToShow)
-        : owner(ownerBox), logicalIndex(startIndex), pluginName(std::move(nameToShow)), bypassed(bypassedToShow)
+    Row(PluginChainListBox& ownerBox, int startIndex, String nameToShow, bool bypassedToShow, bool unavailableToShow)
+        : owner(ownerBox), logicalIndex(startIndex), pluginName(std::move(nameToShow)),
+          bypassed(bypassedToShow), unavailable(unavailableToShow)
     {
         bypassButton.setButtonText("Bypass");
         bypassButton.setClickingTogglesState(true);
@@ -23,7 +24,7 @@ public:
         };
         addAndMakeVisible(bypassButton);
 
-        editButton.setButtonText("Edit");
+        editButton.setButtonText(unavailable ? "Retry" : "Edit");
         editButton.onClick = [this] { owner.listener.editPluginRequested(logicalIndex); };
         addAndMakeVisible(editButton);
 
@@ -57,8 +58,10 @@ public:
         for (int i = 0; i < 3; ++i)
             g.drawHorizontalLine(handle.getY() + i * (handle.getHeight() / 2), (float) handle.getX(), (float) handle.getRight());
 
-        g.setColour(bypassed ? Colour(0xff9aa0a6) : Colour(0xff1a1a1a));
-        g.drawText(pluginName, area.reduced(4, 0), Justification::centredLeft, true);
+        g.setColour(unavailable ? Colour(0xffb45309)
+                                : (bypassed ? Colour(0xff9aa0a6) : Colour(0xff1a1a1a)));
+        g.drawText(unavailable ? pluginName + " (unavailable)" : pluginName,
+                   area.reduced(4, 0), Justification::centredLeft, true);
     }
 
     void resized() override
@@ -123,6 +126,7 @@ private:
     int logicalIndex;
     String pluginName;
     bool bypassed;
+    bool unavailable;
     TextButton bypassButton, editButton, deleteButton;
     int dragStartY = 0;
     float mouseDownYInParent = 0.0f;
@@ -140,7 +144,8 @@ void PluginChainListBox::setPlugins(const Array<PluginChainEntry>& plugins)
 {
     rows.clear();
     for (int i = 0; i < plugins.size(); ++i)
-        rows.add(new Row(*this, i, plugins.getReference(i).name, plugins.getReference(i).bypassed));
+        rows.add(new Row(*this, i, plugins.getReference(i).name,
+                         plugins.getReference(i).bypassed, plugins.getReference(i).unavailable));
 
     for (auto* row : rows)
         addAndMakeVisible(row);

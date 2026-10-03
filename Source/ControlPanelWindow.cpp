@@ -26,10 +26,6 @@ public:
         addPluginButton.onClick = [this] { showAddPluginMenu(); };
         addAndMakeVisible(addPluginButton);
 
-        deleteStatesButton.setButtonText(String::fromUTF8("\xF0\x9F\x97\x91 Delete Plugin States"));
-        deleteStatesButton.onClick = [this] { owner.deleteAllPluginStates(); };
-        addAndMakeVisible(deleteStatesButton);
-
         activeLabel.setText("Active Plugins (drag to reorder)", dontSendNotification);
         activeLabel.setColour(Label::textColourId, Colours::black);
         addAndMakeVisible(activeLabel);
@@ -53,8 +49,6 @@ public:
         editPluginsButton.setBounds(row1.removeFromLeft(140));
         row1.removeFromLeft(6);
         addPluginButton.setBounds(row1.removeFromLeft(110));
-        row1.removeFromLeft(6);
-        deleteStatesButton.setBounds(row1.removeFromLeft(150));
 
         area.removeFromTop(10);
         activeLabel.setBounds(area.removeFromTop(20));
@@ -87,7 +81,7 @@ private:
     }
 
     IconMenu& owner;
-    TextButton editPluginsButton, addPluginButton, deleteStatesButton;
+    TextButton editPluginsButton, addPluginButton;
     Label activeLabel;
     Viewport viewport;
     PluginChainListBox pluginList;
